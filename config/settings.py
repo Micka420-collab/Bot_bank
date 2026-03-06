@@ -37,7 +37,7 @@ CRYPTO_IPN_SECRET = os.getenv("CRYPTO_IPN_SECRET", "")
 # ══════════════════════════════════════════════
 GAMES = {
     "fortnite": {
-        "name": "🎯 Fortnite",
+        "name": "🎯 Boursobank",
         "emoji": "🎯",
         "tiers": {
             "standard": {"name": "Standard", "price": 5.00, "description": "Compte avec skins basiques"},
