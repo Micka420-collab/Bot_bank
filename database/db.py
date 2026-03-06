@@ -7,11 +7,16 @@ import os
 import json
 import hashlib
 import secrets
-import time
 from datetime import datetime, timedelta
 from contextlib import contextmanager
 
 DATABASE_PATH = os.getenv("DATABASE_PATH", "data/gamevault.db")
+
+
+def sqlite_now(dt=None):
+    """Retourne une date au format SQLite `YYYY-MM-DD HH:MM:SS` (UTC locale du process)."""
+    value = dt or datetime.now()
+    return value.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def get_db_path():
@@ -58,6 +63,18 @@ def init_database():
             created_at TEXT DEFAULT (datetime('now')),
             last_active TEXT DEFAULT (datetime('now')),
             FOREIGN KEY (referred_by) REFERENCES users(user_id)
+        );
+
+        -- Admins panel web
+        CREATE TABLE IF NOT EXISTS admins (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'manager',  -- owner, manager, support
+            mfa_secret TEXT NOT NULL,
+            is_active INTEGER DEFAULT 1,
+            created_at TEXT DEFAULT (datetime('now')),
+            last_login_at TEXT
         );
 
         -- Stock de comptes
@@ -181,7 +198,49 @@ def init_database():
         CREATE INDEX IF NOT EXISTS idx_users_referral ON users(referral_code);
         CREATE INDEX IF NOT EXISTS idx_security_user ON security_logs(user_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_tickets_user ON tickets(user_id, status);
+        CREATE INDEX IF NOT EXISTS idx_admins_username ON admins(username);
         """)
+
+
+# ══════════════════════════════════════════════
+# 🔐 ADMIN OPERATIONS
+# ══════════════════════════════════════════════
+
+def get_admin_by_username(username):
+    """Récupère un admin web par username."""
+    with get_db() as db:
+        row = db.execute("SELECT * FROM admins WHERE username=?", (username.lower(),)).fetchone()
+        return dict(row) if row else None
+
+
+def list_admins():
+    """Liste les admins web actifs/inactifs."""
+    with get_db() as db:
+        rows = db.execute(
+            "SELECT id, username, role, is_active, created_at, last_login_at FROM admins ORDER BY id ASC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def create_admin(username, password_hash, role, mfa_secret):
+    """Crée un admin web."""
+    with get_db() as db:
+        db.execute(
+            "INSERT INTO admins (username, password_hash, role, mfa_secret) VALUES (?, ?, ?, ?)",
+            (username.lower(), password_hash, role, mfa_secret)
+        )
+
+
+def update_admin_last_login(admin_id):
+    """Met à jour la date de dernière connexion admin."""
+    with get_db() as db:
+        db.execute("UPDATE admins SET last_login_at=datetime('now') WHERE id=?", (admin_id,))
+
+
+def disable_admin(admin_id):
+    """Désactive un compte admin web."""
+    with get_db() as db:
+        db.execute("UPDATE admins SET is_active=0 WHERE id=?", (admin_id,))
 
 
 # ══════════════════════════════════════════════
@@ -285,7 +344,7 @@ def reserve_account(game, tier, user_id, minutes=30):
         if not account:
             return None
         
-        reserved_until = (datetime.now() + timedelta(minutes=minutes)).isoformat()
+        reserved_until = sqlite_now(datetime.now() + timedelta(minutes=minutes))
         db.execute(
             "UPDATE accounts SET status='reserved', reserved_by=?, reserved_until=? WHERE id=?",
             (user_id, reserved_until, account["id"])
@@ -319,7 +378,7 @@ def deliver_account(account_id, user_id):
 
 def create_order(user_id, game, tier, delivery_mode, base_price, final_price, discount=0, referral_code=None):
     """Crée une nouvelle commande"""
-    order_ref = f"GV-{int(time.time())}-{secrets.token_hex(3).upper()}"
+    order_ref = f"GV-{secrets.token_hex(8).upper()}"
     with get_db() as db:
         db.execute("""
             INSERT INTO orders (order_ref, user_id, game, tier, delivery_mode, base_price, final_price, 
@@ -386,7 +445,7 @@ def log_security_event(user_id, event_type, details=None, risk_level="low"):
 def get_user_order_count(user_id, hours=1):
     """Compte les commandes récentes d'un utilisateur"""
     with get_db() as db:
-        since = (datetime.now() - timedelta(hours=hours)).isoformat()
+        since = sqlite_now(datetime.now() - timedelta(hours=hours))
         result = db.execute(
             "SELECT COUNT(*) as count FROM orders WHERE user_id=? AND created_at > ?",
             (user_id, since)
@@ -397,7 +456,7 @@ def get_user_order_count(user_id, hours=1):
 def get_failed_payment_count(user_id, hours=24):
     """Compte les paiements échoués récents"""
     with get_db() as db:
-        since = (datetime.now() - timedelta(hours=hours)).isoformat()
+        since = sqlite_now(datetime.now() - timedelta(hours=hours))
         result = db.execute(
             "SELECT COUNT(*) as count FROM orders WHERE user_id=? AND payment_status='failed' AND created_at > ?",
             (user_id, since)
@@ -487,6 +546,23 @@ def add_ticket_message(ticket_id, sender, message):
                 (json.dumps(messages), ticket_id)
             )
 
+
+
+
+def emergency_purge_all_data():
+    """Supprime toutes les données applicatives (garde le schéma)."""
+    with get_db() as db:
+        db.executescript("""
+            DELETE FROM transactions;
+            DELETE FROM reviews;
+            DELETE FROM referrals;
+            DELETE FROM security_logs;
+            DELETE FROM tickets;
+            DELETE FROM orders;
+            DELETE FROM accounts;
+            DELETE FROM users;
+            DELETE FROM sqlite_sequence;
+        """)
 
 def get_stats():
     """Récupère les statistiques globales pour le dashboard"""
