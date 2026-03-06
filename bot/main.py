@@ -3,6 +3,7 @@
 Bot principal avec toutes les commandes et interactions
 """
 import asyncio
+import os
 import logging
 import json
 from datetime import datetime
@@ -26,7 +27,8 @@ from database.db import (
     deliver_account, create_order, update_order_payment, update_order_status,
     get_user_orders, get_order, add_review, get_reviews, get_average_rating,
     create_ticket, add_ticket_message, release_expired_reservations,
-    get_all_stock, ban_user, add_accounts, get_stats, is_user_banned
+    get_all_stock, ban_user, add_accounts, get_stats, is_user_banned,
+    emergency_purge_all_data
 )
 from utils.antifraud import AntifraudEngine
 from payments.handlers import PaymentRouter, PaymentError
@@ -36,6 +38,20 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+
+def mask_order_ref(order_ref: str) -> str:
+    """Masque une référence de commande pour limiter l'exposition des métadonnées."""
+    if not order_ref:
+        return "GV-****"
+    suffix = order_ref[-6:] if len(order_ref) >= 6 else order_ref
+    return f"GV-****{suffix}"
+
+
+def anonymized_customer_label(user) -> str:
+    """Retourne un identifiant client anonyme et stable pour les notifications admin."""
+    user_id = getattr(user, "id", 0) or 0
+    return f"Client#{str(user_id)[-4:].zfill(4)}"
 
 
 # ══════════════════════════════════════════════
@@ -70,19 +86,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     welcome = (
         f"🎮 **Bienvenue sur GameVault, {user.first_name}!**\n\n"
-        f"Le shop N°1 de comptes gaming premium.\n"
+        f"🚀 Comptes premium livrés vite, proprement, en toute discrétion.\n"
         f"{rating_text}\n\n"
-        f"🔒 Paiement sécurisé | ⚡ Livraison instantanée\n"
-        f"💰 Garantie satisfait ou remboursé\n\n"
-        f"Que souhaitez-vous faire ?"
+        f"✅ Paiement sécurisé  •  ⚡ Livraison express\n"
+        f"🛡️ Support réactif 7j/7  •  💸 Offres parrainage\n\n"
+        f"👇 Choisis ce que tu veux faire :"
     )
 
     keyboard = [
-        [InlineKeyboardButton("🛒 Acheter un compte", callback_data="shop")],
+        [InlineKeyboardButton("🔥 Voir les meilleures offres", callback_data="shop")],
         [InlineKeyboardButton("📦 Mes commandes", callback_data="my_orders"),
          InlineKeyboardButton("⭐ Avis clients", callback_data="reviews")],
-        [InlineKeyboardButton("🎁 Parrainage", callback_data="referral"),
-         InlineKeyboardButton("❓ SAV / Support", callback_data="support")],
+        [InlineKeyboardButton("🎁 Gagner avec le parrainage", callback_data="referral"),
+         InlineKeyboardButton("💬 SAV / Support", callback_data="support")],
         [InlineKeyboardButton("ℹ️ Mon compte", callback_data="account")],
     ]
 
@@ -134,8 +150,9 @@ async def shop_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard.append([InlineKeyboardButton("🔙 Retour", callback_data="home")])
 
     text = (
-        "🛒 **SHOP - Choisissez votre jeu**\n\n"
-        "🟢 En stock | 🟡 Stock limité | 🔴 Rupture\n"
+        "🛒 **Catalogue premium**\n\n"
+        "Choisis ton jeu et découvre les formules disponibles.\n"
+        "🟢 En stock  •  🟡 Stock limité  •  🔴 Rupture\n"
     )
 
     if query:
@@ -235,10 +252,10 @@ async def select_delivery(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard.append([InlineKeyboardButton("🔙 Retour", callback_data=f"game_{game_id}")])
 
     text = (
-        f"🚚 **Mode de livraison**\n\n"
-        f"Produit: {game['emoji']} {game['name']} - {tier['name']}\n"
-        f"Prix de base: {tier['price']:.2f}€\n\n"
-        f"Choisissez votre vitesse de livraison:"
+        f"🚚 **Choisis ta vitesse de livraison**\n\n"
+        f"🎮 Produit: {game['emoji']} {game['name']} - {tier['name']}\n"
+        f"💶 Prix de base: {tier['price']:.2f}€\n\n"
+        f"⚡ Plus c'est rapide, plus c'est prioritaire :"
     )
 
     await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard))
@@ -280,12 +297,12 @@ async def select_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
 
     text = (
-        f"💰 **Récapitulatif de commande**\n\n"
+        f"💎 **Récapitulatif premium**\n\n"
         f"🎮 {game['emoji']} {game['name']} - {tier['name']}\n"
         f"🚚 {mode['name']}\n"
         f"{'💸 Réduction parrainage: -' + f'{discount:.2f}€' + chr(10) if discount else ''}"
         f"\n**💶 Total: {final_price:.2f}€**\n\n"
-        f"Choisissez votre moyen de paiement:"
+        f"🔐 Sélectionne ton moyen de paiement :"
     )
 
     await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard))
@@ -346,7 +363,7 @@ async def process_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await query.edit_message_text(
             f"🔗 **Lien de paiement généré!**\n\n"
-            f"📋 Commande: `{order['order_ref']}`\n"
+            f"📋 Commande: `{mask_order_ref(order['order_ref'])}`\n"
             f"💶 Montant: {final_price:.2f}€\n\n"
             f"⏳ Ce lien expire dans 30 minutes.\n"
             f"Cliquez ci-dessous pour payer:",
@@ -378,7 +395,7 @@ async def confirm_paid(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.edit_message_text(
         f"⏳ **Vérification du paiement en cours...**\n\n"
-        f"📋 Commande: `{order_ref}`\n\n"
+        f"📋 Commande: `{mask_order_ref(order_ref)}`\n\n"
         f"Votre paiement est en cours de vérification.\n"
         f"Vous recevrez vos identifiants dès confirmation.\n\n"
         f"⏱️ Délai estimé: {DELIVERY_MODES[order['delivery_mode']]['name']}\n"
@@ -392,8 +409,8 @@ async def confirm_paid(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(
                 admin_id,
                 f"🔔 **Nouvelle commande à vérifier!**\n\n"
-                f"📋 {order_ref}\n"
-                f"👤 @{query.from_user.username or 'N/A'}\n"
+                f"📋 {mask_order_ref(order_ref)}\n"
+                f"👤 {anonymized_customer_label(query.from_user)}\n"
                 f"🎮 {GAMES[order['game']]['name']} - {order['tier']}\n"
                 f"💶 {order['final_price']:.2f}€\n"
                 f"💳 {order['payment_method']}",
@@ -410,7 +427,7 @@ async def cancel_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     order_ref = query.data.replace("cancel_order_", "")
     update_order_status(order_ref, "cancelled")
     await query.edit_message_text(
-        f"❌ Commande `{order_ref}` annulée.\n\nTapez /start pour revenir au menu.",
+        f"❌ Commande `{mask_order_ref(order_ref)}` annulée.\n\nTapez /start pour revenir au menu.",
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -421,7 +438,7 @@ async def handle_payment_return(update: Update, context: ContextTypes.DEFAULT_TY
     if order and order["payment_status"] == "pending":
         await update.message.reply_text(
             f"⏳ **Vérification en cours...**\n\n"
-            f"Commande `{order_ref}` en cours de traitement.\n"
+            f"Commande `{mask_order_ref(order_ref)}` en cours de traitement.\n"
             f"Vous recevrez vos identifiants bientôt!",
             parse_mode=ParseMode.MARKDOWN
         )
@@ -441,7 +458,7 @@ async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     orders = get_user_orders(user_id)
 
     if not orders:
-        text = "📦 **Mes commandes**\n\nAucune commande pour le moment.\nTapez /shop pour commencer!"
+        text = "📦 **Mes commandes**\n\nAucune commande pour l’instant.\n🔥 Tapez /shop pour profiter des offres du moment."
         if query:
             await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN)
         else:
@@ -459,12 +476,12 @@ async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         emoji = status_emojis.get(order["order_status"], "❓")
         game = GAMES.get(order["game"], {})
         text += (
-            f"{emoji} `{order['order_ref']}`\n"
+            f"{emoji} `{mask_order_ref(order['order_ref'])}`\n"
             f"   {game.get('emoji', '')} {order['tier']} - {order['final_price']:.2f}€\n\n"
         )
         if order["order_status"] == "delivered" and order.get("id"):
             keyboard.append([
-                InlineKeyboardButton(f"⭐ Noter {order['order_ref']}", callback_data=f"review_{order['id']}")
+                InlineKeyboardButton(f"⭐ Noter {mask_order_ref(order['order_ref'])}", callback_data=f"review_{order['id']}")
             ])
 
     keyboard.append([InlineKeyboardButton("🔙 Menu", callback_data="home")])
@@ -488,7 +505,7 @@ async def show_reviews(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reviews = get_reviews(limit=10)
     avg = get_average_rating()
 
-    text = f"⭐ **Avis clients** - {avg['average']}/5 ({avg['count']} avis)\n\n"
+    text = f"⭐ **Avis clients vérifiés** - {avg['average']}/5 ({avg['count']} avis)\n\n"
 
     if not reviews:
         text += "Aucun avis pour le moment."
@@ -596,12 +613,12 @@ async def support_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
 
     text = (
-        "📞 **Service Après-Vente**\n\n"
-        "Choisissez une option:\n\n"
-        "📩 **Ticket** - Réponse sous 24h\n"
-        f"💬 **Contact direct** - Pour les urgences\n\n"
+        "📞 **Service Après-Vente VIP**\n\n"
+        "Choisissez une option :\n\n"
+        "📩 **Ticket** - Réponse rapide sous 24h max\n"
+        f"💬 **Contact direct** - Priorité sur les urgences\n\n"
         "⚠️ Les demandes exceptionnelles (hors stock,\n"
-        "livraison urgente) sont facturées en supplément."
+        "livraison urgente) peuvent avoir un supplément."
     )
 
     if query:
@@ -689,8 +706,15 @@ async def account_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Panel admin dans Telegram"""
+    query = update.callback_query
+    if query:
+        await query.answer()
+
     if update.effective_user.id not in ADMIN_IDS:
-        await update.message.reply_text("🚫 Accès refusé.")
+        if update.message:
+            await update.message.reply_text("🚫 Accès refusé.")
+        elif query:
+            await query.edit_message_text("🚫 Accès refusé.")
         return
 
     stats = get_stats()
@@ -713,9 +737,13 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("✅ Valider commandes", callback_data="admin_validate")],
         [InlineKeyboardButton("🎫 Voir tickets", callback_data="admin_tickets")],
         [InlineKeyboardButton("🚫 Gérer bans", callback_data="admin_bans")],
+        [InlineKeyboardButton("🚨 Urgence", callback_data="admin_emergency")],
     ]
 
-    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard))
+    if query:
+        await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard))
+    else:
+        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 async def admin_restock(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -829,7 +857,7 @@ async def admin_deliver(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(
             order["user_id"],
             f"🎉 **Commande livrée!**\n\n"
-            f"📋 Commande: `{order_ref}`\n"
+            f"📋 Commande: `{mask_order_ref(order_ref)}`\n"
             f"🎮 {GAMES[order['game']]['name']}\n\n"
             f"🔐 **Vos identifiants:**\n"
             f"```\n{account['credentials']}\n```\n"
@@ -838,7 +866,7 @@ async def admin_deliver(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"⭐ N'oubliez pas de laisser un avis!",
             parse_mode=ParseMode.MARKDOWN
         )
-        await update.message.reply_text(f"✅ Commande {order_ref} livrée avec succès!")
+        await update.message.reply_text(f"✅ Commande {mask_order_ref(order_ref)} livrée avec succès!")
     except Exception as e:
         await update.message.reply_text(f"⚠️ Livré en DB mais erreur Telegram: {e}")
 
@@ -871,21 +899,98 @@ async def navigate_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rating_text = f"⭐ {rating['average']}/5 ({rating['count']} avis)" if rating['count'] > 0 else "🆕 Nouveau shop"
 
     text = (
-        f"🎮 **GameVault**\n\n"
+        f"🎮 **GameVault Premium**\n\n"
         f"{rating_text}\n"
-        f"Que souhaitez-vous faire ?"
+        f"⚡ Livraison rapide • 🔒 Paiement sécurisé\n\n"
+        f"👇 Que voulez-vous faire ?"
     )
 
     keyboard = [
-        [InlineKeyboardButton("🛒 Acheter un compte", callback_data="shop")],
+        [InlineKeyboardButton("🔥 Voir les meilleures offres", callback_data="shop")],
         [InlineKeyboardButton("📦 Mes commandes", callback_data="my_orders"),
          InlineKeyboardButton("⭐ Avis clients", callback_data="reviews")],
-        [InlineKeyboardButton("🎁 Parrainage", callback_data="referral"),
-         InlineKeyboardButton("❓ SAV / Support", callback_data="support")],
+        [InlineKeyboardButton("🎁 Gagner avec le parrainage", callback_data="referral"),
+         InlineKeyboardButton("💬 SAV / Support", callback_data="support")],
         [InlineKeyboardButton("ℹ️ Mon compte", callback_data="account")],
     ]
 
     await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+
+async def admin_emergency_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Menu d'urgence pour purge totale."""
+    query = update.callback_query
+    if query:
+        await query.answer()
+        if query.from_user.id not in ADMIN_IDS:
+            return
+
+    text = (
+        "🚨 **MODE URGENCE**\n\n"
+        "Cette action est irréversible.\n"
+        "- Supprime utilisateurs, commandes, stock, tickets, logs\n"
+        "- Remet l'application à zéro\n\n"
+        "Choisissez une action:"
+    )
+    keyboard = [
+        [InlineKeyboardButton("🧹 Purger la base", callback_data="admin_emergency_purge")],
+        [InlineKeyboardButton("💥 Purger + arrêter le bot", callback_data="admin_emergency_nuke")],
+        [InlineKeyboardButton("🔙 Retour admin", callback_data="admin_back")],
+    ]
+
+    if query:
+        await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def admin_emergency_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Demande une double confirmation avant destruction des données."""
+    query = update.callback_query
+    await query.answer()
+    if query.from_user.id not in ADMIN_IDS:
+        return
+
+    action = query.data.replace("admin_emergency_", "")
+    if action not in {"purge", "nuke"}:
+        return
+
+    keyboard = [
+        [InlineKeyboardButton("✅ CONFIRMER", callback_data=f"admin_emergency_confirm_{action}")],
+        [InlineKeyboardButton("❌ Annuler", callback_data="admin_back")],
+    ]
+    await query.edit_message_text(
+        "⚠️ **CONFIRMATION REQUISE**\n\n"
+        "Vous êtes sur le point de tout supprimer.\n"
+        "Cette opération est définitive.",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def admin_emergency_execute(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Exécute la purge totale et optionnellement arrête le bot."""
+    query = update.callback_query
+    await query.answer()
+    if query.from_user.id not in ADMIN_IDS:
+        return
+
+    action = query.data.replace("admin_emergency_confirm_", "")
+    emergency_purge_all_data()
+
+    for admin_id in ADMIN_IDS:
+        try:
+            await context.bot.send_message(
+                admin_id,
+                "🚨 Purge d'urgence exécutée: base vidée (users/orders/stock/tickets/logs)."
+            )
+        except Exception:
+            pass
+
+    if action == "nuke":
+        await query.edit_message_text("💥 Purge complète terminée. Arrêt du bot en cours...")
+        os._exit(0)
+
+    await query.edit_message_text("🧹 Purge complète terminée. Application remise à zéro.")
 
 
 # ══════════════════════════════════════════════
@@ -942,6 +1047,10 @@ def main():
     app.add_handler(CallbackQueryHandler(new_ticket, pattern="^new_ticket$"))
     app.add_handler(CallbackQueryHandler(account_info, pattern="^account$"))
     app.add_handler(CallbackQueryHandler(admin_restock, pattern="^admin_restock$"))
+    app.add_handler(CallbackQueryHandler(admin_panel, pattern="^admin_back$"))
+    app.add_handler(CallbackQueryHandler(admin_emergency_menu, pattern="^admin_emergency$"))
+    app.add_handler(CallbackQueryHandler(admin_emergency_confirm, pattern="^admin_emergency_(purge|nuke)$"))
+    app.add_handler(CallbackQueryHandler(admin_emergency_execute, pattern="^admin_emergency_confirm_(purge|nuke)$"))
 
     # Message handlers
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_ticket_message))
